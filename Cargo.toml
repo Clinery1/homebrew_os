@@ -1,0 +1,17 @@
+[package]
+name="homebrew_os"
+version="0.0.1"
+authors=["Clinery"]
+edition="2018"
+
+[dependencies]
+cpio_reader="^0.1"
+raw-cpuid="^10.2"
+spin="^0.9"
+line_drawing={path="/home/clinery/github/line_drawing"} # This is to make `num_traits` `#[no_std]`
+x86_64="^0.14"
+embedded-graphics="^0.7"
+bitmap-font={path="/home/clinery/github/bitmap-font"}
+lazy_static={version="^1.4",features=["spin_no_std"]}
+pic8259="^0.10"
+pc-keyboard="^0.5"

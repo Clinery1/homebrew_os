@@ -1,0 +1,10 @@
+{
+    "disksize":128,
+    "config":"bootboot/env",
+    "initrd":{"type":"cpio","gzip":true,"directory":"init"},
+    "iso9660":1,
+    "partitions":[
+        {"type":"boot","size":32},
+        {"type":"fat","name":"Root","file":"target/fs.img"}
+    ]
+}

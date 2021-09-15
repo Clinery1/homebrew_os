@@ -1,0 +1,12 @@
+# Changelog
+- Added screen module
+    - Used `embedded-graphics` for the graphics and `bitmap-font` for the font
+- Added memory module
+    - Added paging support (uses bootboot provided tables)
+    - Added a frame allocator/deallocator. Panics when there are no free frames. TODO: fix this
+    - Added a global allocator (allows us to use `alloc`). NOT TESTED: UNSTABLE
+- Added interrupt support
+    - PS/2 Keyboard interrupt
+    - Some exceptions. Double fault handler for the rest
+- Added a GDT
+- Started work on the module loading system (very basic)

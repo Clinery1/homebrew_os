@@ -1,0 +1,6 @@
+/target
+/init/kernel
+/bootboot/mkbootimg
+/stop
+/font
+**/*.bak

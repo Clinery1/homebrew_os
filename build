@@ -1,0 +1,3 @@
+#!/bin/fish
+make&&
+./bootboot/mkbootimg bootboot/os.json target/image
