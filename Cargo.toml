@@ -3,6 +3,7 @@ name="homebrew_os"
 version="0.0.1"
 authors=["Clinery"]
 edition="2018"
+license-file="LICENSE"
 
 [dependencies]
 cpio_reader="^0.1"
