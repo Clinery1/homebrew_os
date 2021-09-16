@@ -7,11 +7,13 @@ pub const PAGE_SIZE:u64=4096;
 
 
 /// These denotate the start of a free page
+#[derive(Copy,Clone,Debug)]
 pub struct LinkedListNode {
     magic:u64,
     size:u64,
     next:Option<*mut LinkedListNode>,
 }
+#[allow(dead_code)]
 impl LinkedListNode {
     pub fn new(next:Option<*mut LinkedListNode>)->LinkedListNode {
         LinkedListNode {

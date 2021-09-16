@@ -1,3 +1,9 @@
+//! This module contains [`PageAllocator`] and [`FrameAllocator`]
+//!
+//! `PageAllocator` contains functions to allocate physical memory as contiguous virtual memory
+//! which may/may not be contiguous in physical memory.
+
+
 use x86_64::{
     addr::{
         VirtAddr,
@@ -6,12 +12,16 @@ use x86_64::{
     registers::control::Cr3,
     structures::paging::{
         PageTable,
+        PageTableFlags,
         FrameAllocator as FrameAllocatorTrait,
         FrameDeallocator as FrameDeallocatorTrait,
         mapper::{
             OffsetPageTable,
+            Mapper,
+            MapperFlush,
         },
         page::{
+            Page,
             Size4KiB,
         },
         frame::{
@@ -20,6 +30,10 @@ use x86_64::{
     },
 };
 use spin::Mutex;
+use core::ops::{
+    Deref,
+    DerefMut,
+};
 use crate::{
     bootboot::{
         BootBootUnpacked,
@@ -35,39 +49,133 @@ use super::{
 };
 
 
+pub const STARTING_MEM_OFFSET:u64=1099511627776;  // 1TB
 
 
 lazy_static::lazy_static! {
-    pub static ref FRAME_ALLOCATOR:Mutex<FrameAllocator>={
+    pub static ref FRAME_ALLOCATOR:Mutex<PageAllocator>={   // this kinda has to be lazy since it relies on RT things
         let bb:BootBootUnpacked=unsafe{*(BOOTBOOT_INFO as *const BOOTBOOT)}.into();
-        Mutex::new(FrameAllocator::new_cr3(VirtAddr::new(0),&bb))
+        Mutex::new(PageAllocator::new(&bb))
     };
 }
 
 
-#[allow(dead_code)]
-pub struct FrameAllocator {
-    first_free_node:Option<u64>,
-    physical_location_of_directory:PhysAddr,
-    page_directory:OffsetPageTable<'static>,
+pub enum FrameAllocateError {
+    Oom,
 }
-impl FrameAllocator {
-    pub fn new_cr3(at:VirtAddr,bb:&BootBootUnpacked)->FrameAllocator {
+
+
+pub struct PageAllocator {
+    frame:FrameAllocator,
+    page:OffsetPageTable<'static>,
+}
+impl PageAllocator {
+    pub fn new(bb:&BootBootUnpacked)->PageAllocator {
         let (cr3,_)=Cr3::read();
         let page_directory=unsafe{(cr3.start_address().as_u64() as *mut u8 as *mut PageTable).as_mut().unwrap()};
+        PageAllocator {
+            frame:FrameAllocator::new(&bb),
+            page:unsafe{OffsetPageTable::new(page_directory,VirtAddr::new(0))}
+        }
+    }
+    pub fn min_frames_from_size(size:usize)->usize {
+        let mut frames=size/4096;
+        if size%4096>0 {frames+=1}
+        return frames;
+    }
+    /// This is continuous (virtual) memory. Physical memory may/may not be contiguous
+    pub fn allocate(&mut self,size:usize)->Result<VirtAddr,FrameAllocateError> {
+        let frames=Self::min_frames_from_size(size);
+        if let Some(frame)=self.allocate_frame() {
+            if let Ok((addr,flush))=unsafe{self.map_frame(frame,None)} {
+                for frame_idx in 1..frames {
+                    let addr_offset=addr+(PAGE_SIZE as usize*frame_idx);
+                    if let Some(frame)=self.allocate_frame() {
+                        if let Err(_)=unsafe{self.map_frame(frame,Some(addr_offset))} {
+                            // if we don't succeed at mapping it, then deallocate it so we don't
+                            // fill the RAM with unused allocations
+                            unsafe {
+                                self.frame.deallocate_frame(frame);
+                                self.deallocate(addr,(frame_idx-1)*PAGE_SIZE as usize).unwrap();
+                            }
+                            return Err(FrameAllocateError::Oom);
+                        }
+                    } else {
+                        // same here, except we didn't even allocate a frame this time.
+                        unsafe {
+                            self.deallocate(addr,(frame_idx-1)*PAGE_SIZE as usize).unwrap();
+                        }
+                        return Err(FrameAllocateError::Oom);
+                    }
+                }
+                flush.flush();
+                return Ok(addr);
+            } else {
+                // same here, except we don't even get past the first mapping!
+                unsafe {
+                    self.frame.deallocate_frame(frame);
+                }
+            }
+        }
+        return Err(FrameAllocateError::Oom);
+    }
+    /// Caller must make sure `virt` is a valid, unmapped page address. If `virt` is unaligned, we
+    /// return `Err(())`
+    pub unsafe fn map_frame(&mut self,frame:PhysFrame<Size4KiB>,virt:Option<VirtAddr>)->Result<(VirtAddr,MapperFlush<Size4KiB>),()> {
+        let virt=virt.unwrap_or({
+            let addr=self.memory_allocate_offset;
+            self.memory_allocate_offset+=PAGE_SIZE;
+            VirtAddr::new(addr)
+        });
+        if let Ok(page)=Page::<Size4KiB>::from_start_address(virt) {
+            return Ok((virt,self.page.map_to(page,frame,PageTableFlags::PRESENT,&mut self.frame).unwrap()));
+        }
+        return Err(());
+    }
+    /// Accepts pointers to continuous (virtual) memory. Physical memory may/may not be contiguous
+    pub unsafe fn deallocate(&mut self,ptr:VirtAddr,size:usize)->Result<(),()> {
+        let frames=Self::min_frames_from_size(size);
+        let ptr=ptr;
+        for frame in 0..frames {
+            let addr=ptr+(PAGE_SIZE as usize*frame);
+            let page=Page::<Size4KiB>::from_start_address(addr).unwrap();
+            if let Ok((frame,flush))=self.page.unmap(page) {
+                self.deallocate_frame(frame);
+                flush.flush();
+            } else {
+                return Err(());
+            }
+        }
+        return Ok(());
+    }
+}
+impl Deref for PageAllocator {
+    type Target=FrameAllocator;
+    fn deref(&self)->&FrameAllocator {
+        &self.frame
+    }
+}
+impl DerefMut for PageAllocator {
+    fn deref_mut(&mut self)->&mut FrameAllocator {
+        &mut self.frame
+    }
+}
+pub struct FrameAllocator {
+    first_free_node:Option<u64>,
+    memory_allocate_offset:u64,
+}
+impl FrameAllocator {
+    pub fn new(bb:&BootBootUnpacked)->FrameAllocator {
         FrameAllocator {
             first_free_node:Some(Self::mark_free(bb)),
-            physical_location_of_directory:cr3.start_address(),
-            page_directory:unsafe{OffsetPageTable::new(page_directory,at)},
+            memory_allocate_offset:STARTING_MEM_OFFSET,
         }
     }
     #[allow(dead_code)]
-    pub fn new_addr(addr:PhysAddr,at:VirtAddr,bb:&BootBootUnpacked)->FrameAllocator {
-        let page_directory=unsafe{(addr.as_u64() as *mut u8 as *mut PageTable).as_mut().unwrap()};
+    pub fn new_addr(bb:&BootBootUnpacked)->FrameAllocator {
         FrameAllocator {
             first_free_node:Some(Self::mark_free(bb)),
-            physical_location_of_directory:addr,
-            page_directory:unsafe{OffsetPageTable::new(page_directory,at)},
+            memory_allocate_offset:STARTING_MEM_OFFSET,
         }
     }
     pub fn mark_free(bb:&BootBootUnpacked)->u64 {
@@ -86,10 +194,10 @@ impl FrameAllocator {
                     size-=offset;
                 }
                 if start==PhysAddr::new(0) {
-                    start+=4096u64;
-                    size-=4096;
+                    start+=PAGE_SIZE;
+                    size-=PAGE_SIZE;
                 }
-                if size%4096==0&&size>4096 {
+                if size%PAGE_SIZE==0&&size>PAGE_SIZE {
                     let ptr=start.as_u64() as *mut LinkedListNode;
                     unsafe{ptr.write(LinkedListNode::new_size(None,size));}
                     if let None=first_node {    // only executes once
@@ -104,7 +212,6 @@ impl FrameAllocator {
                 }
             }
         }
-        println!("Mapped {} free pages. Aligned {} addresses",list_entries,not_aligned);
         return first_node.expect("BootBoot did not specify any free memory!") as u64;
     }
 }
@@ -113,20 +220,19 @@ unsafe impl FrameAllocatorTrait<Size4KiB> for FrameAllocator {
         if let Some(node_ptr)=self.first_free_node {
             let node=unsafe{(node_ptr as *mut u8 as *mut LinkedListNode).read()};
             if !node.verify() {return None} // if this activates, we are in trouble
-            if node.size>4096 {
+            if node.size>PAGE_SIZE {
                 let node_addr=node_ptr as u64;
-                let next_node_addr=node_addr+4096;
+                let next_node_addr=node_addr+PAGE_SIZE;
                 let next_node_addr_ptr=next_node_addr as *mut u8 as *mut LinkedListNode;
-                unsafe{next_node_addr_ptr.write(LinkedListNode::new_size(node.next,node.size-4096));}   // replace this node with an altered one in the next frame
+                unsafe{next_node_addr_ptr.write(LinkedListNode::new_size(node.next,node.size-PAGE_SIZE));}   // replace this node with an altered one in the next frame
                 self.first_free_node=Some(next_node_addr);
                 let node_ptr=node_ptr as *mut [u64;3];
                 unsafe{node_ptr.write([0;3]);}  // clear the old node
-                return None;
+                return Some(PhysFrame::from_start_address(PhysAddr::new(node_addr)).unwrap());
             } else {
                 let addr=node_ptr as u64;
                 let node_ptr=node_ptr as *mut [u64;3];
                 unsafe{node_ptr.write([0;3]);}
-                println!("Allocated frame at {}",addr);
                 if let Some(next_ptr)=node.next {   // rewriting to avoid `unwrap()`s
                     self.first_free_node=Some(next_ptr as u64);
                 } else {
@@ -148,7 +254,6 @@ impl FrameDeallocatorTrait<Size4KiB> for FrameAllocator {
             ptr.write(LinkedListNode::new(None));
         }
         self.first_free_node=Some(ptr as u64);
-        println!("Deallocated frame at {}",frame.start_address().as_u64());
     }
 }
 

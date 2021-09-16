@@ -1,5 +1,5 @@
 #!/bin/fish
-if make
+if ./build
     virsh destroy HomebrewOS    # just in case we are already running
     virsh start HomebrewOS
 end

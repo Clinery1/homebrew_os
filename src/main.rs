@@ -25,17 +25,13 @@ use raw_cpuid::{
     CpuId,
     TopologyType,
 };
-use x86_64::{
-    addr::VirtAddr,
-    structures::paging::{
-        FrameAllocator as FrameAllocatorTrait,
-        FrameDeallocator as FrameDeallocatorTrait,
-    },
+use alloc::{
+    vec,
 };
 use spin::Mutex;
 use bootboot::*;
 use memory::frame::{
-    FrameAllocator,
+    PageAllocator,
     print_mmap,
 };
 
@@ -85,11 +81,14 @@ fn _start()->! {  // This runs on all cores at once
         interrupts::init(core).unwrap();    // we are core 0, so this will never panic
         iter_delay(10000);
         unsafe{*CPUS.lock()+=1;}
+        let vec=vec![10,9,8,7,6,5,4,3,2,1,0];
         println!("{} logical cores detected\n{} threads/physical core\n{} logical cores checked in",cores,threads,unsafe{CPUS.lock()});
         println!("Screen resolution: {}x{}",bootboot.fb.width,bootboot.fb.height);
-        println!("Success!");
         print_mmap(&bootboot);
-        let mut frame_allocator=FrameAllocator::new_cr3(VirtAddr::new(0),&bootboot);
+        for item in vec {
+            println!("Item: {}",item);
+        }
+        println!("Success!");
         loop {  // do nothing
             x86_64::instructions::hlt();
         }
